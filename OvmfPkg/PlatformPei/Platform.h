@@ -63,6 +63,11 @@ GetSystemMemorySizeBelow4gb (
   );
 
 VOID
+QemuUc32BaseInitialization (
+  VOID
+  );
+
+VOID
 InitializeRamRegions (
   VOID
   );

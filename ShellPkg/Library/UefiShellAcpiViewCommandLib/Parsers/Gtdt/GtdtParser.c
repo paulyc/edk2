@@ -5,13 +5,16 @@
   SPDX-License-Identifier: BSD-2-Clause-Patent
 
   @par Reference(s):
-    - ACPI 6.2 Specification - Errata A, September 2017
+    - ACPI 6.3 Specification - January 2019
   **/
 
 #include <IndustryStandard/Acpi.h>
 #include <Library/UefiLib.h>
 #include "AcpiParser.h"
 #include "AcpiTableParser.h"
+
+// "The number of GT Block Timers must be less than or equal to 8"
+#define GT_BLOCK_TIMER_COUNT_MAX 8
 
 // Local variables
 STATIC CONST UINT32* GtdtPlatformTimerCount;
@@ -36,7 +39,21 @@ EFIAPI
 ValidateGtBlockTimerCount (
   IN UINT8* Ptr,
   IN VOID*  Context
-  );
+  )
+{
+  UINT32 BlockTimerCount;
+
+  BlockTimerCount = *(UINT32*)Ptr;
+
+  if (BlockTimerCount > GT_BLOCK_TIMER_COUNT_MAX) {
+    IncrementErrorCount ();
+    Print (
+      L"\nERROR: Timer Count = %d. Max Timer Count is %d.",
+      BlockTimerCount,
+      GT_BLOCK_TIMER_COUNT_MAX
+      );
+  }
+}
 
 /**
   This function validates the GT Frame Number.
@@ -51,7 +68,21 @@ EFIAPI
 ValidateGtFrameNumber (
   IN UINT8* Ptr,
   IN VOID*  Context
-  );
+  )
+{
+  UINT8 FrameNumber;
+
+  FrameNumber = *(UINT8*)Ptr;
+
+  if (FrameNumber >= GT_BLOCK_TIMER_COUNT_MAX) {
+    IncrementErrorCount ();
+    Print (
+      L"\nERROR: GT Frame Number = %d. GT Frame Number must be in range 0-%d.",
+      FrameNumber,
+      GT_BLOCK_TIMER_COUNT_MAX - 1
+      );
+  }
+}
 
 /**
   An ACPI_PARSER array describing the ACPI GTDT Table.
@@ -77,7 +108,9 @@ STATIC CONST ACPI_PARSER GtdtParser[] = {
   {L"Platform Timer Count", 4, 88, L"%d", NULL,
    (VOID**)&GtdtPlatformTimerCount, NULL, NULL},
   {L"Platform Timer Offset", 4, 92, L"0x%x", NULL,
-   (VOID**)&GtdtPlatformTimerOffset, NULL, NULL}
+   (VOID**)&GtdtPlatformTimerOffset, NULL, NULL},
+  {L"Virtual EL2 Timer GSIV", 4, 96, L"0x%x", NULL, NULL, NULL, NULL},
+  {L"Virtual EL2 Timer Flags", 4, 100, L"0x%x", NULL, NULL, NULL, NULL}
 };
 
 /**
@@ -131,62 +164,6 @@ STATIC CONST ACPI_PARSER SBSAGenericWatchdogParser[] = {
   {L"Watchdog Timer GSIV", 4, 20, L"0x%x", NULL, NULL, NULL, NULL},
   {L"Watchdog Timer Flags", 4, 24, L"0x%x", NULL, NULL, NULL, NULL}
 };
-
-/**
-  This function validates the GT Block timer count.
-
-  @param [in] Ptr     Pointer to the start of the field data.
-  @param [in] Context Pointer to context specific information e.g. this
-                      could be a pointer to the ACPI table header.
-**/
-STATIC
-VOID
-EFIAPI
-ValidateGtBlockTimerCount (
-  IN UINT8* Ptr,
-  IN VOID*  Context
-  )
-{
-  UINT32 BlockTimerCount;
-
-  BlockTimerCount = *(UINT32*)Ptr;
-
-  if (BlockTimerCount > 8) {
-    IncrementErrorCount ();
-    Print (
-      L"\nERROR: Timer Count = %d. Max Timer Count is 8.",
-      BlockTimerCount
-      );
-  }
-}
-
-/**
-  This function validates the GT Frame Number.
-
-  @param [in] Ptr     Pointer to the start of the field data.
-  @param [in] Context Pointer to context specific information e.g. this
-                      could be a pointer to the ACPI table header.
-**/
-STATIC
-VOID
-EFIAPI
-ValidateGtFrameNumber (
-  IN UINT8* Ptr,
-  IN VOID*  Context
-  )
-{
-  UINT8 FrameNumber;
-
-  FrameNumber = *(UINT8*)Ptr;
-
-  if (FrameNumber > 7) {
-    IncrementErrorCount ();
-    Print (
-      L"\nERROR: GT Frame Number = %d. GT Frame Number must be in range 0-7.",
-      FrameNumber
-      );
-  }
-}
 
 /**
   This function parses the Platform GT Block.

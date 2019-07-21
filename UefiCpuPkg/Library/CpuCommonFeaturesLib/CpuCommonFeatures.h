@@ -88,6 +88,21 @@ AesniInitialize (
   );
 
 /**
+  Prepares for the data used by CPU feature detection and initialization.
+
+  @param[in]  NumberOfProcessors  The number of CPUs in the platform.
+
+  @return  Pointer to a buffer of CPU related configuration data.
+
+  @note This service could be called by BSP only.
+**/
+VOID *
+EFIAPI
+ClockModulationGetConfigData (
+  IN UINTN  NumberOfProcessors
+  );
+
+/**
   Detects if Clock Modulation feature supported on current processor.
 
   @param[in]  ProcessorNumber  The index of the CPU executing this function.
@@ -845,6 +860,21 @@ X2ApicInitialize (
 VOID *
 EFIAPI
 FeatureControlGetConfigData (
+  IN UINTN               NumberOfProcessors
+  );
+
+/**
+  Prepares for the data used by CPU feature detection and initialization.
+
+  @param[in]  NumberOfProcessors  The number of CPUs in the platform.
+
+  @return  Pointer to a buffer of CPU related configuration data.
+
+  @note This service could be called by BSP only.
+**/
+VOID *
+EFIAPI
+PpinGetConfigData (
   IN UINTN               NumberOfProcessors
   );
 

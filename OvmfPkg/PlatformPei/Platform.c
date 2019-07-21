@@ -174,23 +174,25 @@ MemMapInitialization (
   AddIoMemoryRangeHob (0x0A0000, BASE_1MB);
 
   if (!mXen) {
+    UINT32  TopOfLowRam;
     UINT64  PciExBarBase;
     UINT32  PciBase;
     UINT32  PciSize;
 
+    TopOfLowRam = GetSystemMemorySizeBelow4gb ();
     PciExBarBase = 0;
-    PciBase = (mQemuUc32Base < BASE_2GB) ? BASE_2GB : mQemuUc32Base;
     if (mHostBridgeDevId == INTEL_Q35_MCH_DEVICE_ID) {
       //
-      // The 32-bit PCI host aperture is expected to fall between the top of
-      // low RAM and the base of the MMCONFIG area.
+      // The MMCONFIG area is expected to fall between the top of low RAM and
+      // the base of the 32-bit PCI host aperture.
       //
       PciExBarBase = FixedPcdGet64 (PcdPciExpressBaseAddress);
-      ASSERT (PciBase < PciExBarBase);
+      ASSERT (TopOfLowRam <= PciExBarBase);
       ASSERT (PciExBarBase <= MAX_UINT32 - SIZE_256MB);
-      PciSize = (UINT32)(PciExBarBase - PciBase);
+      PciBase = (UINT32)(PciExBarBase + SIZE_256MB);
     } else {
-      PciSize = 0xFC000000 - PciBase;
+      ASSERT (TopOfLowRam <= mQemuUc32Base);
+      PciBase = mQemuUc32Base;
     }
 
     //
@@ -206,6 +208,7 @@ MemMapInitialization (
     // 0xFED20000    gap                          896 KB
     // 0xFEE00000    LAPIC                          1 MB
     //
+    PciSize = 0xFC000000 - PciBase;
     AddIoMemoryBaseSizeHob (PciBase, PciSize);
     PcdStatus = PcdSet64S (PcdPciMmio32Base, PciBase);
     ASSERT_RETURN_ERROR (PcdStatus);
@@ -647,6 +650,8 @@ InitializePlatform (
   }
 
   PublishPeiMemory ();
+
+  QemuUc32BaseInitialization ();
 
   InitializeRamRegions ();
 

@@ -14,6 +14,7 @@ Module Name:
 // The package level header files this module uses
 //
 #include <IndustryStandard/E820.h>
+#include <IndustryStandard/I440FxPiix4.h>
 #include <IndustryStandard/Q35MchIch9.h>
 #include <PiPei.h>
 
@@ -97,6 +98,54 @@ Q35TsegMbytesInitialization (
   PcdStatus = PcdSet16S (PcdQ35TsegMbytes, ExtendedTsegMbytes);
   ASSERT_RETURN_ERROR (PcdStatus);
   mQ35TsegMbytes = ExtendedTsegMbytes;
+}
+
+
+VOID
+QemuUc32BaseInitialization (
+  VOID
+  )
+{
+  UINT32 LowerMemorySize;
+  UINT32 Uc32Size;
+
+  if (mXen) {
+    return;
+  }
+
+  if (mHostBridgeDevId == INTEL_Q35_MCH_DEVICE_ID) {
+    //
+    // On q35, the 32-bit area that we'll mark as UC, through variable MTRRs,
+    // starts at PcdPciExpressBaseAddress. The platform DSC is responsible for
+    // setting PcdPciExpressBaseAddress such that describing the
+    // [PcdPciExpressBaseAddress, 4GB) range require a very small number of
+    // variable MTRRs (preferably 1 or 2).
+    //
+    ASSERT (FixedPcdGet64 (PcdPciExpressBaseAddress) <= MAX_UINT32);
+    mQemuUc32Base = (UINT32)FixedPcdGet64 (PcdPciExpressBaseAddress);
+    return;
+  }
+
+  ASSERT (mHostBridgeDevId == INTEL_82441_DEVICE_ID);
+  //
+  // On i440fx, start with the [LowerMemorySize, 4GB) range. Make sure one
+  // variable MTRR suffices by truncating the size to a whole power of two,
+  // while keeping the end affixed to 4GB. This will round the base up.
+  //
+  LowerMemorySize = GetSystemMemorySizeBelow4gb ();
+  Uc32Size = GetPowerOfTwo32 ((UINT32)(SIZE_4GB - LowerMemorySize));
+  mQemuUc32Base = (UINT32)(SIZE_4GB - Uc32Size);
+  //
+  // Assuming that LowerMemorySize is at least 1 byte, Uc32Size is at most 2GB.
+  // Therefore mQemuUc32Base is at least 2GB.
+  //
+  ASSERT (mQemuUc32Base >= BASE_2GB);
+
+  if (mQemuUc32Base != LowerMemorySize) {
+    DEBUG ((DEBUG_VERBOSE, "%a: rounded UC32 base from 0x%x up to 0x%x, for "
+      "an UC32 size of 0x%x\n", __FUNCTION__, LowerMemorySize, mQemuUc32Base,
+      Uc32Size));
+  }
 }
 
 
@@ -665,8 +714,6 @@ QemuInitializeRam (
   // cover it exactly.
   //
   if (IsMtrrSupported ()) {
-    UINT32 Uc32Size;
-
     MtrrGetAllMtrrs (&MtrrSettings);
 
     //
@@ -692,25 +739,12 @@ QemuInitializeRam (
     ASSERT_EFI_ERROR (Status);
 
     //
-    // Set memory range from the "top of lower RAM" (RAM below 4GB) to 4GB as
-    // uncacheable. Make sure one variable MTRR suffices by truncating the size
-    // to a whole power of two. This will round the base *up*, and a gap (not
-    // used for either RAM or MMIO) may stay in the middle, marked as
-    // cacheable-by-default.
+    // Set the memory range from the start of the 32-bit MMIO area (32-bit PCI
+    // MMIO aperture on i440fx, PCIEXBAR on q35) to 4GB as uncacheable.
     //
-    Uc32Size = GetPowerOfTwo32 ((UINT32)(SIZE_4GB - LowerMemorySize));
-    mQemuUc32Base = (UINT32)(SIZE_4GB - Uc32Size);
-    if (mQemuUc32Base != LowerMemorySize) {
-      DEBUG ((DEBUG_VERBOSE, "%a: rounded UC32 base from 0x%x up to 0x%x, for "
-        "an UC32 size of 0x%x\n", __FUNCTION__, (UINT32)LowerMemorySize,
-        mQemuUc32Base, Uc32Size));
-    }
-
-    Status = MtrrSetMemoryAttribute (mQemuUc32Base, Uc32Size,
+    Status = MtrrSetMemoryAttribute (mQemuUc32Base, SIZE_4GB - mQemuUc32Base,
                CacheUncacheable);
     ASSERT_EFI_ERROR (Status);
-  } else {
-    mQemuUc32Base = (UINT32)LowerMemorySize;
   }
 }
 

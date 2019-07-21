@@ -625,8 +625,16 @@ class BuildTask:
             BuildTask._ErrorFlag.set()
             BuildTask._ErrorMessage = "%s broken\n    %s [%s]" % \
                                       (threading.currentThread().getName(), Command, WorkingDir)
-        if self.BuildItem.BuildObject in GlobalData.gModuleBuildTracking and not BuildTask._ErrorFlag.isSet():
-            GlobalData.gModuleBuildTracking[self.BuildItem.BuildObject] = True
+
+        # Set the value used by hash invalidation flow in GlobalData.gModuleBuildTracking to 'SUCCESS'
+        # If Module or Lib is being tracked, it did not fail header check test, and built successfully
+        if (self.BuildItem.BuildObject.Arch in GlobalData.gModuleBuildTracking and
+           self.BuildItem.BuildObject in GlobalData.gModuleBuildTracking[self.BuildItem.BuildObject.Arch] and
+           GlobalData.gModuleBuildTracking[self.BuildItem.BuildObject.Arch][self.BuildItem.BuildObject] != 'FAIL_METAFILE' and
+           not BuildTask._ErrorFlag.isSet()
+           ):
+            GlobalData.gModuleBuildTracking[self.BuildItem.BuildObject.Arch][self.BuildItem.BuildObject] = 'SUCCESS'
+
         # indicate there's a thread is available for another build task
         BuildTask._RunningQueueLock.acquire()
         BuildTask._RunningQueue.pop(self.BuildItem)
@@ -1154,27 +1162,30 @@ class Build():
     #
     #
     def invalidateHash(self):
-        # GlobalData.gModuleBuildTracking contains only modules that cannot be skipped by hash
-        for moduleAutoGenObj in GlobalData.gModuleBuildTracking.keys():
-            # False == FAIL : True == Success
-            # Skip invalidating for Successful module builds
-            if GlobalData.gModuleBuildTracking[moduleAutoGenObj] == True:
-                continue
+        # Only for hashing feature
+        if not GlobalData.gUseHashCache:
+            return
 
-            # The module failed to build or failed to start building, from this point on
+        # GlobalData.gModuleBuildTracking contains only modules or libs that cannot be skipped by hash
+        for moduleAutoGenObjArch in GlobalData.gModuleBuildTracking.keys():
+            for moduleAutoGenObj in GlobalData.gModuleBuildTracking[moduleAutoGenObjArch].keys():
+                # Skip invalidating for Successful Module/Lib builds
+                if GlobalData.gModuleBuildTracking[moduleAutoGenObjArch][moduleAutoGenObj] == 'SUCCESS':
+                    continue
 
-            # Remove .hash from build
-            if GlobalData.gUseHashCache:
-                ModuleHashFile = path.join(moduleAutoGenObj.BuildDir, moduleAutoGenObj.Name + ".hash")
+                # The module failed to build, failed to start building, or failed the header check test from this point on
+
+                # Remove .hash from build
+                ModuleHashFile = os.path.join(moduleAutoGenObj.BuildDir, moduleAutoGenObj.Name + ".hash")
                 if os.path.exists(ModuleHashFile):
                     os.remove(ModuleHashFile)
 
-            # Remove .hash file from cache
-            if GlobalData.gBinCacheDest:
-                FileDir = path.join(GlobalData.gBinCacheDest, moduleAutoGenObj.Arch, moduleAutoGenObj.SourceDir, moduleAutoGenObj.MetaFile.BaseName)
-                HashFile = path.join(FileDir, moduleAutoGenObj.Name + '.hash')
-                if os.path.exists(HashFile):
-                    os.remove(HashFile)
+                # Remove .hash file from cache
+                if GlobalData.gBinCacheDest:
+                    FileDir = os.path.join(GlobalData.gBinCacheDest, moduleAutoGenObj.Arch, moduleAutoGenObj.SourceDir, moduleAutoGenObj.MetaFile.BaseName)
+                    HashFile = os.path.join(FileDir, moduleAutoGenObj.Name + '.hash')
+                    if os.path.exists(HashFile):
+                        os.remove(HashFile)
 
     ## Build a module or platform
     #
@@ -1239,6 +1250,9 @@ class Build():
             BuildCommand = BuildCommand + [Target]
             LaunchCommand(BuildCommand, AutoGenObject.MakeFileDir)
             self.CreateAsBuiltInf()
+            if GlobalData.gBinCacheDest:
+                self.UpdateBuildCache()
+            self.BuildModules = []
             return True
 
         # build library
@@ -1257,6 +1271,9 @@ class Build():
                 NewBuildCommand = BuildCommand + ['-f', os.path.normpath(os.path.join(Mod, makefile)), 'pbuild']
                 LaunchCommand(NewBuildCommand, AutoGenObject.MakeFileDir)
             self.CreateAsBuiltInf()
+            if GlobalData.gBinCacheDest:
+                self.UpdateBuildCache()
+            self.BuildModules = []
             return True
 
         # cleanlib
@@ -1350,6 +1367,9 @@ class Build():
                 BuildCommand = BuildCommand + [Target]
             AutoGenObject.BuildTime = LaunchCommand(BuildCommand, AutoGenObject.MakeFileDir)
             self.CreateAsBuiltInf()
+            if GlobalData.gBinCacheDest:
+                self.UpdateBuildCache()
+            self.BuildModules = []
             return True
 
         # genfds
@@ -1479,7 +1499,7 @@ class Build():
         if self.Fdf:
             # First get the XIP base address for FV map file.
             GuidPattern = re.compile("[-a-fA-F0-9]+")
-            GuidName = re.compile("\(GUID=[-a-fA-F0-9]+")
+            GuidName = re.compile(r"\(GUID=[-a-fA-F0-9]+")
             for FvName in Wa.FdfProfile.FvDict:
                 FvMapBuffer = os.path.join(Wa.FvDir, FvName + '.Fv.map')
                 if not os.path.exists(FvMapBuffer):
@@ -1804,7 +1824,12 @@ class Build():
                             MaList.append(Ma)
                             if Ma.CanSkipbyHash():
                                 self.HashSkipModules.append(Ma)
+                                if GlobalData.gBinCacheSource:
+                                    EdkLogger.quiet("cache hit: %s[%s]" % (Ma.MetaFile.Path, Ma.Arch))
                                 continue
+                            else:
+                                if GlobalData.gBinCacheSource:
+                                    EdkLogger.quiet("cache miss: %s[%s]" % (Ma.MetaFile.Path, Ma.Arch))
                             # Not to auto-gen for targets 'clean', 'cleanlib', 'cleanall', 'run', 'fds'
                             if self.Target not in ['clean', 'cleanlib', 'cleanall', 'run', 'fds']:
                                 # for target which must generate AutoGen code and makefile
@@ -1825,9 +1850,11 @@ class Build():
                                 if self.Target == "genmake":
                                     return True
                             self.BuildModules.append(Ma)
-                            # Initialize all modules in tracking to False (FAIL)
-                            if Ma not in GlobalData.gModuleBuildTracking:
-                                GlobalData.gModuleBuildTracking[Ma] = False
+                            # Initialize all modules in tracking to 'FAIL'
+                            if Ma.Arch not in GlobalData.gModuleBuildTracking:
+                                GlobalData.gModuleBuildTracking[Ma.Arch] = dict()
+                            if Ma not in GlobalData.gModuleBuildTracking[Ma.Arch]:
+                                GlobalData.gModuleBuildTracking[Ma.Arch][Ma] = 'FAIL'
                     self.AutoGenTime += int(round((time.time() - AutoGenStart)))
                     MakeStart = time.time()
                     for Ma in self.BuildModules:
@@ -1856,6 +1883,9 @@ class Build():
                 ExitFlag.set()
                 BuildTask.WaitForComplete()
                 self.CreateAsBuiltInf()
+                if GlobalData.gBinCacheDest:
+                    self.UpdateBuildCache()
+                self.BuildModules = []
                 self.MakeTime += int(round((time.time() - MakeContiue)))
                 if BuildTask.HasError():
                     self.invalidateHash()
@@ -1911,6 +1941,7 @@ class Build():
                     # Save MAP buffer into MAP file.
                     #
                     self._SaveMapFile (MapBuffer, Wa)
+        self.invalidateHash()
 
     def _GenFfsCmd(self,ArchList):
         # convert dictionary of Cmd:(Inf,Arch)
@@ -1990,7 +2021,12 @@ class Build():
                             continue
                         if Ma.CanSkipbyHash():
                             self.HashSkipModules.append(Ma)
+                            if GlobalData.gBinCacheSource:
+                                EdkLogger.quiet("cache hit: %s[%s]" % (Ma.MetaFile.Path, Ma.Arch))
                             continue
+                        else:
+                            if GlobalData.gBinCacheSource:
+                                EdkLogger.quiet("cache miss: %s[%s]" % (Ma.MetaFile.Path, Ma.Arch))
 
                         # Not to auto-gen for targets 'clean', 'cleanlib', 'cleanall', 'run', 'fds'
                         if self.Target not in ['clean', 'cleanlib', 'cleanall', 'run', 'fds']:
@@ -2009,9 +2045,11 @@ class Build():
                             if self.Target == "genmake":
                                 continue
                         self.BuildModules.append(Ma)
-                        # Initialize all modules in tracking to False (FAIL)
-                        if Ma not in GlobalData.gModuleBuildTracking:
-                            GlobalData.gModuleBuildTracking[Ma] = False
+                        # Initialize all modules in tracking to 'FAIL'
+                        if Ma.Arch not in GlobalData.gModuleBuildTracking:
+                            GlobalData.gModuleBuildTracking[Ma.Arch] = dict()
+                        if Ma not in GlobalData.gModuleBuildTracking[Ma.Arch]:
+                            GlobalData.gModuleBuildTracking[Ma.Arch][Ma] = 'FAIL'
                     self.Progress.Stop("done!")
                     self.AutoGenTime += int(round((time.time() - AutoGenStart)))
                     MakeStart = time.time()
@@ -2048,6 +2086,9 @@ class Build():
                 ExitFlag.set()
                 BuildTask.WaitForComplete()
                 self.CreateAsBuiltInf()
+                if GlobalData.gBinCacheDest:
+                    self.UpdateBuildCache()
+                self.BuildModules = []
                 self.MakeTime += int(round((time.time() - MakeContiue)))
                 #
                 # Check for build error, and raise exception if one
@@ -2099,6 +2140,7 @@ class Build():
                     # Save MAP buffer into MAP file.
                     #
                     self._SaveMapFile(MapBuffer, Wa)
+        self.invalidateHash()
 
     ## Generate GuidedSectionTools.txt in the FV directories.
     #
@@ -2186,22 +2228,25 @@ class Build():
             RemoveDirectory(os.path.dirname(GlobalData.gDatabasePath), True)
 
     def CreateAsBuiltInf(self):
+        for Module in self.BuildModules:
+            Module.CreateAsBuiltInf()
+
+    def UpdateBuildCache(self):
         all_lib_set = set()
         all_mod_set = set()
         for Module in self.BuildModules:
-            Module.CreateAsBuiltInf()
+            Module.CopyModuleToCache()
             all_mod_set.add(Module)
         for Module in self.HashSkipModules:
-            Module.CreateAsBuiltInf(True)
+            Module.CopyModuleToCache()
             all_mod_set.add(Module)
         for Module in all_mod_set:
             for lib in Module.LibraryAutoGenList:
                 all_lib_set.add(lib)
         for lib in all_lib_set:
-            lib.CreateAsBuiltInf(True)
+            lib.CopyModuleToCache()
         all_lib_set.clear()
         all_mod_set.clear()
-        self.BuildModules = []
         self.HashSkipModules = []
     ## Do some clean-up works when error occurred
     def Relinquish(self):
