@@ -7,11 +7,11 @@
 **/
 
 #include "BdsPlatform.h"
-#include <Guid/XenInfo.h>
 #include <Guid/RootBridgesConnectedEventGroup.h>
 #include <Protocol/FirmwareVolume2.h>
 #include <Library/PlatformBmPrintScLib.h>
 #include <Library/Tcg2PhysicalPresenceLib.h>
+#include <Library/XenPlatformLib.h>
 
 
 //
@@ -398,7 +398,8 @@ PlatformBootManagerBeforeConsole (
   //
   EfiBootManagerDispatchDeferredImages ();
 
-  PlatformInitializeConsole (gPlatformConsole);
+  PlatformInitializeConsole (
+    XenDetected() ? gXenPlatformConsole : gPlatformConsole);
   PcdStatus = PcdSet16S (PcdPlatformBootTimeOut,
                 GetFrontPageTimeoutFromQemu ());
   ASSERT_RETURN_ERROR (PcdStatus);
@@ -1208,6 +1209,12 @@ PciAcpiInitialization (
       PciWrite8 (PCI_LIB_ADDRESS (0, 0x1f, 0, 0x6b), 0x0b); // H
       break;
     default:
+      if (XenDetected ()) {
+        //
+        // There is no PCI bus in this case.
+        //
+        return;
+      }
       DEBUG ((EFI_D_ERROR, "%a: Unknown Host Bridge Device ID: 0x%04x\n",
         __FUNCTION__, mHostBridgeDevId));
       ASSERT (FALSE);
@@ -1223,38 +1230,6 @@ PciAcpiInitialization (
   // Set ACPI SCI_EN bit in PMCNTRL
   //
   IoOr16 ((PciRead32 (Pmba) & ~BIT0) + 4, BIT0);
-}
-
-/**
-  This function detects if OVMF is running on Xen.
-
-**/
-STATIC
-BOOLEAN
-XenDetected (
-  VOID
-  )
-{
-  EFI_HOB_GUID_TYPE         *GuidHob;
-  STATIC INTN               FoundHob = -1;
-
-  if (FoundHob == 0) {
-    return FALSE;
-  } else if (FoundHob == 1) {
-    return TRUE;
-  }
-
-  //
-  // See if a XenInfo HOB is available
-  //
-  GuidHob = GetFirstGuidHob (&gEfiXenInfoGuid);
-  if (GuidHob == NULL) {
-    FoundHob = 0;
-    return FALSE;
-  }
-
-  FoundHob = 1;
-  return TRUE;
 }
 
 EFI_STATUS
@@ -1656,9 +1631,18 @@ PlatformBootManagerWaitCallback (
 {
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION Black;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION White;
-  UINT16                              Timeout;
+  UINT16                              TimeoutInitial;
 
-  Timeout = PcdGet16 (PcdPlatformBootTimeOut);
+  TimeoutInitial = PcdGet16 (PcdPlatformBootTimeOut);
+
+  //
+  // If PcdPlatformBootTimeOut is set to zero, then we consider
+  // that no progress update should be enacted (since we'd only
+  // ever display a one-shot progress of either 0% or 100%).
+  //
+  if (TimeoutInitial == 0) {
+    return;
+  }
 
   Black.Raw = 0x00000000;
   White.Raw = 0x00FFFFFF;
@@ -1668,7 +1652,7 @@ PlatformBootManagerWaitCallback (
     Black.Pixel,
     L"Start boot option",
     White.Pixel,
-    (Timeout - TimeoutRemain) * 100 / Timeout,
+    (TimeoutInitial - TimeoutRemain) * 100 / TimeoutInitial,
     0
     );
 }
